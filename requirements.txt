@@ -1,7 +1,11 @@
 livekit-agents
 livekit-plugins-assemblyai
 livekit-plugins-openai
-livekit-plugins-ollama
 livekit-plugins-silero
+livekit-plugins-cartesia
 python-dotenv
 pydantic-ai-slim[openai,mcp]
+firecrawl-py
+# 版本限制以解决 Windows 平台兼容性问题
+onnxruntime==1.18.0
+numpy<2

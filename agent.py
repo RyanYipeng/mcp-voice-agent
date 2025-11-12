@@ -13,7 +13,7 @@ from typing import Any, Callable, List, Optional
 
 import inspect
 from dotenv import load_dotenv
-from firecrawl import FirecrawlApp, ScrapeOptions
+from firecrawl import Firecrawl
 from pydantic_ai.mcp import MCPServerStdio
 
 from livekit.agents import (
@@ -25,7 +25,7 @@ from livekit.agents import (
     cli,
     function_tool,
 )
-from livekit.plugins import assemblyai, openai, silero, ollama
+from livekit.plugins import assemblyai, openai, silero
 
 # ------------------------------------------------------------------------------
 # 配置和日志
@@ -37,24 +37,32 @@ logger = logging.getLogger(__name__)
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 SUPABASE_TOKEN = os.getenv("SUPABASE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")  # 可选：用于中转站等自定义 API 端点
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct")  # OpenAI 模型名称（需支持函数调用）
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")  # Ollama 模型名称
+USE_LOCAL_LLM = os.getenv("USE_LOCAL_LLM", "false").lower() == "true"  # 是否强制使用本地 Ollama（优先级高于 OpenAI）
+TTS_VOICE = os.getenv("TTS_VOICE", "FunAudioLLM/CosyVoice2-0.5B:claire")  # 硅基流动 TTS 语音
 
 if not FIRECRAWL_API_KEY:
     logger.error("环境变量中未设置 FIRECRAWL_API_KEY。")
     raise EnvironmentError("请设置 FIRECRAWL_API_KEY 环境变量。")
 
 if not SUPABASE_TOKEN:
-    logger.error("环境变量中未设置 SUPABASE_ACCESS_TOKEN。")
-    raise EnvironmentError("请设置 SUPABASE_ACCESS_TOKEN 环境变量。")
+    logger.warning("环境变量中未设置 SUPABASE_ACCESS_TOKEN。")
+    logger.warning("Supabase MCP 集成将不可用，仅使用 Firecrawl 搜索功能。")
 
 # 检查是否使用 OpenAI API 或本地 Ollama
-if OPENAI_API_KEY:
+if USE_LOCAL_LLM:
+    logger.info("USE_LOCAL_LLM=true，强制使用本地 Ollama 模型。")
+    USE_OPENAI = False
+elif OPENAI_API_KEY:
     logger.info("检测到 OPENAI_API_KEY，将使用 OpenAI API。")
     USE_OPENAI = True
 else:
     logger.info("未检测到 OPENAI_API_KEY，将使用本地 Ollama 模型。")
     USE_OPENAI = False
 
-firecrawl_app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+firecrawl_app = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
 
 def _py_type(schema: dict) -> Any:
@@ -136,14 +144,16 @@ async def firecrawl_search(
     try:
         result = await loop.run_in_executor(
             None,
-            lambda: firecrawl_app.crawl_url(
-                url,
+            lambda: firecrawl_app.crawl(
+                url=url,
                 limit=limit,
-                scrape_options=ScrapeOptions(formats=["text", "markdown"])
+                formats=["markdown", "text"]
             )
         )
-        logger.info("Firecrawl 返回了 %d 个页面", len(result))
-        return result
+        # 新版 API 返回的是 job 对象，包含 data 字段
+        data = result.data if hasattr(result, 'data') else result
+        logger.info("Firecrawl 返回了 %d 个页面", len(data) if isinstance(data, list) else 1)
+        return data
     except Exception as e:
         logger.error("Firecrawl 搜索失败：%s", e, exc_info=True)
         return []
@@ -234,45 +244,91 @@ async def entrypoint(ctx: JobContext) -> None:
     LiveKit 智能体的主入口点。
     """
     await ctx.connect()
-    server = MCPServerStdio(
-        "npx",
-        args=["-y", "@supabase/mcp-server-supabase@latest", "--access-token", SUPABASE_TOKEN],
+    
+    # 尝试连接 Supabase MCP 服务器（可选）
+    supabase_tools = []
+    server = None
+    
+    if SUPABASE_TOKEN:
+        try:
+            logger.info("尝试连接 Supabase MCP 服务器...")
+            server = MCPServerStdio(
+                "npx",
+                args=["-y", "@supabase/mcp-server-postgrest@latest", "--access-token", SUPABASE_TOKEN],
+            )
+            await server.__aenter__()
+            supabase_tools = await build_livekit_tools(server)
+            logger.info(f"Supabase MCP 连接成功，获得 {len(supabase_tools)} 个工具。")
+        except Exception as e:
+            logger.warning(f"Supabase MCP 连接失败：{e}")
+            logger.warning("将继续使用 Firecrawl 搜索功能。")
+            server = None
+    else:
+        logger.info("未配置 SUPABASE_ACCESS_TOKEN，跳过 Supabase MCP 连接。")
+    
+    # 构建工具列表
+    tools = [firecrawl_search] + supabase_tools
+    
+    # 构建 Agent 指令
+    if supabase_tools:
+        instructions = (
+            "您可以通过 `firecrawl_search` 执行实时网络搜索，"
+            "或通过 Supabase MCP 工具执行数据库查询。"
+            "根据用户需要新鲜的网络数据（新闻、外部事实）"
+            "还是内部 Supabase 数据来选择合适的工具。"
+        )
+    else:
+        instructions = (
+            "您可以通过 `firecrawl_search` 执行实时网络搜索，"
+            "获取最新的网络信息、新闻和外部事实。"
+        )
+    
+    agent = Agent(
+        instructions=instructions,
+        tools=tools,
     )
-    await server.__aenter__()
 
     try:
-        supabase_tools = await build_livekit_tools(server)
-        tools = [firecrawl_search] + supabase_tools
 
-        agent = Agent(
-            instructions=(
-                "您可以通过 `firecrawl_search` 执行实时网络搜索，"
-                "或通过 Supabase MCP 工具执行数据库查询。"
-                "根据用户需要新鲜的网络数据（新闻、外部事实）"
-                "还是内部 Supabase 数据来选择合适的工具。"
-            ),
-            tools=tools,
-        )
-
-        # 根据配置选择 LLM 和 TTS
+        # 根据配置选择 LLM
         if USE_OPENAI:
-            llm = openai.LLM(model="gpt-4o")
-            tts = openai.TTS(voice="ash")
-            logger.info("使用 OpenAI GPT-4o 模型和 TTS。")
+            if OPENAI_BASE_URL:
+                llm = openai.LLM(model=OPENAI_MODEL, base_url=OPENAI_BASE_URL)
+                logger.info(f"使用自定义 OpenAI API 端点：{OPENAI_BASE_URL}")
+            else:
+                llm = openai.LLM(model=OPENAI_MODEL)
+                logger.info("使用官方 OpenAI API。")
+            logger.info(f"使用 OpenAI {OPENAI_MODEL} 模型。")
         else:
-            llm = ollama.LLM(model="llama3.2")
-            tts = openai.TTS(voice="ash")  # TTS 仍使用 OpenAI，如需本地方案请配置
-            logger.info("使用本地 Ollama llama3.2 模型。")
+            # 使用 Ollama（通过 openai 插件提供）
+            llm = openai.LLM.with_ollama(
+                model=OLLAMA_MODEL,
+                base_url="http://localhost:11434/v1"
+            )
+            logger.info(f"使用本地 Ollama {OLLAMA_MODEL} 模型。")
+        
+        # 使用硅基流动 TTS（通过 OpenAI 兼容接口）
+        if not OPENAI_API_KEY:
+            logger.error("TTS 配置错误：未设置 OPENAI_API_KEY。")
+            logger.error("请在 .env 文件中配置：OPENAI_API_KEY=your-siliconflow-key")
+            raise EnvironmentError("需要配置 OPENAI_API_KEY 用于硅基流动 TTS。")
+        
+        if OPENAI_BASE_URL:
+            tts = openai.TTS(voice=TTS_VOICE, base_url=OPENAI_BASE_URL)
+        else:
+            tts = openai.TTS(voice=TTS_VOICE)
+        logger.info(f"使用硅基流动 TTS（语音: {TTS_VOICE}）。")
         
         session = AgentSession(
             vad=silero.VAD.load(min_silence_duration=0.1),
-            stt=assemblyai.STT(word_boost=["Supabase"]),
+            stt=assemblyai.STT(),
             llm=llm,
             tts=tts,
         )
 
         await session.start(agent=agent, room=ctx.room)
-        await session.generate_reply(instructions="你好！我今天能为您做些什么？")
+        # await session.generate_reply(instructions="你好！我今天能为您做些什么？")  # 跳过初始问候，直接开始对话
+        logger.info("Agent 已就绪，等待用户输入。按 Ctrl+B 切换文本/音频模式。")
 
         # 保持会话活动直到取消
         try:
@@ -282,7 +338,8 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("会话已取消，正在关闭。")
 
     finally:
-        await server.__aexit__(None, None, None)
+        if server:
+            await server.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":
