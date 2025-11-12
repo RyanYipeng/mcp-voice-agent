@@ -25,7 +25,7 @@ from livekit.agents import (
     cli,
     function_tool,
 )
-from livekit.plugins import assemblyai, openai, silero
+from livekit.plugins import assemblyai, openai, silero, ollama
 
 # ------------------------------------------------------------------------------
 # 配置和日志
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 SUPABASE_TOKEN = os.getenv("SUPABASE_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not FIRECRAWL_API_KEY:
     logger.error("环境变量中未设置 FIRECRAWL_API_KEY。")
@@ -44,6 +45,14 @@ if not FIRECRAWL_API_KEY:
 if not SUPABASE_TOKEN:
     logger.error("环境变量中未设置 SUPABASE_ACCESS_TOKEN。")
     raise EnvironmentError("请设置 SUPABASE_ACCESS_TOKEN 环境变量。")
+
+# 检查是否使用 OpenAI API 或本地 Ollama
+if OPENAI_API_KEY:
+    logger.info("检测到 OPENAI_API_KEY，将使用 OpenAI API。")
+    USE_OPENAI = True
+else:
+    logger.info("未检测到 OPENAI_API_KEY，将使用本地 Ollama 模型。")
+    USE_OPENAI = False
 
 firecrawl_app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
@@ -245,11 +254,21 @@ async def entrypoint(ctx: JobContext) -> None:
             tools=tools,
         )
 
+        # 根据配置选择 LLM 和 TTS
+        if USE_OPENAI:
+            llm = openai.LLM(model="gpt-4o")
+            tts = openai.TTS(voice="ash")
+            logger.info("使用 OpenAI GPT-4o 模型和 TTS。")
+        else:
+            llm = ollama.LLM(model="llama3.2")
+            tts = openai.TTS(voice="ash")  # TTS 仍使用 OpenAI，如需本地方案请配置
+            logger.info("使用本地 Ollama llama3.2 模型。")
+        
         session = AgentSession(
             vad=silero.VAD.load(min_silence_duration=0.1),
             stt=assemblyai.STT(word_boost=["Supabase"]),
-            llm=openai.LLM(model="gpt-4o"),
-            tts=openai.TTS(voice="ash"),
+            llm=llm,
+            tts=tts,
         )
 
         await session.start(agent=agent, room=ctx.room)

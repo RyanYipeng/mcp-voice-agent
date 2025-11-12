@@ -1,6 +1,7 @@
 livekit-agents
 livekit-plugins-assemblyai
 livekit-plugins-openai
+livekit-plugins-ollama
 livekit-plugins-silero
 python-dotenv
 pydantic-ai-slim[openai,mcp]

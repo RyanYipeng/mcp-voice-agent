@@ -16,11 +16,12 @@ pip install -r requirements.txt
 
 ### 环境要求
 
-- Firecrawl API 密钥
-- Supabase 访问令牌
-- OpenAI API 密钥
-- AssemblyAI API 密钥
-- LiveKit 凭证
+- Firecrawl API 密钥（必需）
+- Supabase 访问令牌（必需）
+- OpenAI API 密钥（可选，未设置时将使用本地 Ollama 模型）
+- AssemblyAI API 密钥（必需）
+- LiveKit 凭证（必需）
+- Ollama（当不使用 OpenAI API 时需要安装）
 
 ### 配置
 
@@ -47,24 +48,25 @@ python agent.py
 智能体将会：
 1. 连接到 LiveKit
 2. 初始化 Supabase 集成的 MCP 服务器
-3. 设置语音交互功能
+3. 设置语音交互功能（自动检测是否使用 OpenAI API 或本地 Ollama 模型）
 4. 开始监听用户输入
+
+**模型选择逻辑：**
+- 如果设置了 `OPENAI_API_KEY`，将使用 OpenAI GPT-4o 模型
+- 如果未设置 `OPENAI_API_KEY`，将自动切换到本地 Ollama 模型（默认使用 llama3.2）
+- 确保在使用 Ollama 之前已安装并运行 Ollama 服务
 
 ## 功能特性
 
 - 使用 Firecrawl 进行实时网络搜索
 - 通过 MCP 集成 Supabase 数据库
+- 灵活的模型选择：
+  - 优先使用 OpenAI GPT-4o（需要 API 密钥）
+  - 备选方案：本地 Ollama 模型（llama3.2）
 - 语音交互功能：
   - Silero VAD（语音活动检测）
   - AssemblyAI 语音转文字
-  - OpenAI GPT-4 语言处理
   - OpenAI TTS 文字转语音
-
-## 📬 订阅我们的新闻通讯！
-
-**订阅我们的新闻通讯，免费获取数据科学电子书** 📖，包含 150 多个数据科学基础课程！及时了解最新教程、见解和独家资源。[立即订阅！](https://join.dailydoseofds.com)
-
-[![Daily Dose of Data Science Newsletter](https://github.com/patchy631/ai-engineering/blob/main/resources/join_ddods.png)](https://join.dailydoseofds.com)
 
 ## 贡献
 
